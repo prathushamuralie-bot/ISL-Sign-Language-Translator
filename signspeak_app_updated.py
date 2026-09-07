@@ -43,6 +43,9 @@ ALPHABET_MODEL_PATH = "model/alphabet_model.pkl"
 
 MODEL_PATH = "model/sign_model.pkl"
 HAND_MODEL_PATH = "hand_landmarker.task"
+FACE_MODEL_PATH = "face_landmarker.task"
+EYEBROW_RAISE_THRESHOLD = 0.4   # blendshape score (0-1) - tune if too sensitive/insensitive
+EYEBROW_HOLD_SECONDS = 0.6      # how long eyebrows must stay raised to count as "question"
 CONFIDENCE_THRESHOLD = 70.0
 ALPHABET_CONFIDENCE_THRESHOLD = 45.0
 HOLD_DURATION = 1.2
@@ -81,6 +84,29 @@ options = vision.HandLandmarkerOptions(
     running_mode=vision.RunningMode.IMAGE
 )
 landmarker = vision.HandLandmarker.create_from_options(options)
+
+# ---- Face Landmarker setup (for eyebrow-raise -> question detection) ----
+face_base_options = mp_python.BaseOptions(model_asset_path=FACE_MODEL_PATH)
+face_options = vision.FaceLandmarkerOptions(
+    base_options=face_base_options,
+    output_face_blendshapes=True,
+    output_facial_transformation_matrixes=False,
+    num_faces=1,
+    running_mode=vision.RunningMode.IMAGE
+)
+face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
+
+
+def get_eyebrow_raise_score(face_result):
+    """Returns 0-1 score for how much the eyebrows are raised (blendshapes)."""
+    if not face_result.face_blendshapes:
+        return 0.0
+    blendshapes = face_result.face_blendshapes[0]
+    score = 0.0
+    for shape in blendshapes:
+        if shape.category_name in ("browInnerUp", "browOuterUpLeft", "browOuterUpRight"):
+            score = max(score, shape.score)
+    return score
 
 
 def normalize_single_hand(landmarks):
@@ -168,6 +194,7 @@ class SignLanguageApp:
         self.letter_hold_start = None
         self.last_added_letter = ""
         self.letter_prediction_history = []
+        self.eyebrows_raised_during_sentence = False  # NEW: tracks if a question expression was shown
 
         self.cap = cv2.VideoCapture(0)
 
@@ -453,6 +480,13 @@ class SignLanguageApp:
 
             self.process_prediction(prediction, confidence)
 
+            # ---- NEW: Face expression detection (eyebrow raise -> question) ----
+            face_result = face_landmarker.detect(mp_image)
+            eyebrow_score = get_eyebrow_raise_score(face_result)
+            if eyebrow_score > 0.4:  # threshold - tweak if too sensitive/insensitive
+                self.eyebrows_raised_during_sentence = True
+                self.status_label.configure(text="🤨 Question expression detected", text_color=GOLD_BRIGHT)
+
             self.video_label.update_idletasks()
             target_w = self.video_label.winfo_width()
             target_h = self.video_label.winfo_height()
@@ -602,6 +636,13 @@ class SignLanguageApp:
         translated_words = [translate_word(w, self.current_language) for w in self.sentence]
         raw_text = " ".join(translated_words)
 
+        # NEW: if eyebrows were raised at any point while signing this sentence,
+        # treat it as a question (real ISL grammar uses facial expression, not
+        # just hand signs, to mark questions).
+        if self.eyebrows_raised_during_sentence and not raw_text.strip().endswith("?"):
+            raw_text += "?"
+        self.eyebrows_raised_during_sentence = False  # reset for the next sentence
+
         self.status_label.configure(text="Fixing grammar...", text_color=GOLD_DIM)
 
         threading.Thread(
@@ -734,6 +775,7 @@ class SignLanguageApp:
 
     def clear_sentence(self):
         self.sentence = []
+        self.eyebrows_raised_during_sentence = False
         self.refresh_sentence_display()
 
     def on_close(self):
