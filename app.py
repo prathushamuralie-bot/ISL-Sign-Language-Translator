@@ -1,41 +1,52 @@
 """
-Sign Language Recognition - Full App
-========================================
-Real-time sign detection
-+ Sentence building
-+ Text-to-speech
-+ Emergency Mode
-+ Ambiguous Sign Disambiguation
+============================================================
+        ISL SIGN LANGUAGE TRANSLATOR
+============================================================
 
-CONTROLS:
-- Sign ah 1.5 seconds hold pannunga -> sentence la add aagum
-- 'c' key -> sentence clear pannum
-- 'v' key -> sentence ah voice ah sollum
-- 'b' key -> last word remove pannum
-- 'e' key -> Emergency Mode reset pannum
-- 'q' key -> exit pannum
+FEATURES
+--------
+1. Two-Hand Sign Recognition
+2. 126 Feature Random Forest Model
+3. Smart Context / Sentence Building
+4. Ambiguous Sign Disambiguation
+5. Emergency Communication
+6. Text-to-Speech
+7. Sentence Clear
+8. Backspace
+9. Voice Output
 
-NEW:
-- Ambiguous signs -> top predictions compare pannum
-- Previous sentence context use pannum
-- Similar confidence predictions irundha context-based decision
-- Future facial expression integration-ku ready
+CONTROLS
+--------
+c = Clear sentence
+v = Voice
+b = Backspace
+e = Reset Emergency Mode
+q = Quit
+
+MODEL
+-----
+sign_model.pkl
+126 features:
+21 landmarks x 3 coordinates x 2 hands
+============================================================
 """
 
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
-import pickle
+
 import numpy as np
+import pickle
 import os
 import time
-from gtts import gTTS
 import threading
+
+from gtts import gTTS
 
 
 # ============================================================
-# SETTINGS
+# CONFIGURATION
 # ============================================================
 
 MODEL_PATH = "model/sign_model.pkl"
@@ -44,9 +55,8 @@ HAND_MODEL_PATH = "hand_landmarker.task"
 CONFIDENCE_THRESHOLD = 70.0
 HOLD_DURATION = 1.5
 
-# Ambiguous sign threshold
-# Top 2 predictions difference <= this value
-# na ambiguous sign-nu consider pannuvom
+# Difference between first and second prediction
+# <= this value -> possible ambiguous sign
 AMBIGUITY_THRESHOLD = 15.0
 
 
@@ -55,60 +65,267 @@ AMBIGUITY_THRESHOLD = 15.0
 # ============================================================
 
 EMERGENCY_SIGNS = {
-    "help": "I need help",
-    "doctor": "I need a doctor",
-    "emergency": "Emergency",
-    "family": "Please call my family",
-    "ambulance": "Please call an ambulance"
+
+    "help":
+        "I need help.",
+
+    "doctor":
+        "I need a doctor.",
+
+    "emergency":
+        "Emergency.",
+
+    "family":
+        "Please call my family.",
+
+    "ambulance":
+        "Please call an ambulance.",
+
+    "hospital":
+        "I need to go to the hospital.",
+
+    "pain":
+        "I am in pain."
+}
+
+
+# ============================================================
+# SMART CONTEXT PHRASES
+# ============================================================
+
+CONTEXT_PHRASES = {
+
+    # --------------------------------------------------------
+    # BASIC NEEDS
+    # --------------------------------------------------------
+
+    ("i", "need", "water"):
+        "I need water.",
+
+    ("i", "want", "water"):
+        "I want water.",
+
+    ("i", "need", "food"):
+        "I need food.",
+
+    ("i", "want", "food"):
+        "I want food.",
+
+    ("i", "need", "help"):
+        "I need help.",
+
+    ("i", "need", "doctor"):
+        "I need a doctor.",
+
+    ("i", "need", "medicine"):
+        "I need medicine.",
+
+    ("i", "need", "hospital"):
+        "I need a hospital.",
+
+
+    # --------------------------------------------------------
+    # EMERGENCY
+    # --------------------------------------------------------
+
+    ("call", "ambulance"):
+        "Please call an ambulance.",
+
+    ("call", "doctor"):
+        "Please call a doctor.",
+
+    ("call", "family"):
+        "Please call my family.",
+
+    ("help", "me"):
+        "Please help me.",
+
+    ("i", "am", "pain"):
+        "I am in pain.",
+
+
+    # --------------------------------------------------------
+    # LOCATION
+    # --------------------------------------------------------
+
+    ("where", "hospital"):
+        "Where is the hospital?",
+
+    ("where", "bathroom"):
+        "Where is the bathroom?",
+
+    ("where", "school"):
+        "Where is the school?",
+
+    ("where", "bus"):
+        "Where is the bus?",
+
+    ("where", "home"):
+        "Where is home?",
+
+
+    # --------------------------------------------------------
+    # TRAVEL
+    # --------------------------------------------------------
+
+    ("i", "want", "go"):
+        "I want to go.",
+
+    ("i", "want", "home"):
+        "I want to go home.",
+
+    ("i", "want", "school"):
+        "I want to go to school.",
+
+    ("i", "want", "hospital"):
+        "I want to go to the hospital.",
+
+
+    # --------------------------------------------------------
+    # SOCIAL
+    # --------------------------------------------------------
+
+    ("what", "your", "name"):
+        "What is your name.",
+
+    ("where", "you"):
+        "Where are you?",
+
+    ("how", "are", "you"):
+        "How are you?",
+
+    ("thank", "you"):
+        "Thank you.",
+
+    ("good", "morning"):
+        "Good morning.",
+
+    ("good", "night"):
+        "Good night.",
+
+
+    # --------------------------------------------------------
+    # QUESTIONS
+    # --------------------------------------------------------
+
+    ("what", "this"):
+        "What is this?",
+
+    ("what", "that"):
+        "What is that?",
+
+    ("where", "this"):
+        "Where is this?",
+
+    ("why", "you"):
+        "Why are you?"
 }
 
 
 # ============================================================
 # AMBIGUOUS SIGN GROUPS
 # ============================================================
-#
-# IMPORTANT:
-# Unga trained model labels different-a irundha
-# inga labels-ai unga model labels-ku match pannunga.
-#
-# Example:
-# CAN and CAN'T visually similar signs na,
-# ["can", "can't"] nu group create pannalam.
-#
-# YES and NO etc. similarly add pannalam.
-#
 
 AMBIGUOUS_SIGN_GROUPS = [
+
     {"can", "can't"},
+
     {"yes", "no"},
+
     {"good", "bad"},
+
     {"come", "go"},
+
     {"here", "there"},
-    {"this", "that"},
+
+    {"this", "that"}
+
 ]
 
 
 # ============================================================
-# CHECK MODEL FILES
+# FILE CHECK
 # ============================================================
 
 if not os.path.exists(MODEL_PATH):
-    print(f"ERROR: '{MODEL_PATH}' kedaikala.")
-    print("Munnadi 'train_model.py' run pannunga.")
-    exit(1)
+
+    print()
+    print("ERROR: Model file not found!")
+    print()
+    print(
+        f"Expected: {MODEL_PATH}"
+    )
+    print()
+    print(
+        "First run train_model.py"
+    )
+    print()
+
+    exit()
+
 
 if not os.path.exists(HAND_MODEL_PATH):
-    print(f"ERROR: '{HAND_MODEL_PATH}' kedaikala.")
-    print("hand_landmarker.task file project folder-la irukkanum.")
-    exit(1)
+
+    print()
+    print("ERROR: hand_landmarker.task not found!")
+    print()
+    print(
+        "Place hand_landmarker.task in the project folder."
+    )
+    print()
+
+    exit()
 
 
 # ============================================================
-# LOAD SIGN RECOGNITION MODEL
+# LOAD RANDOM FOREST MODEL
 # ============================================================
 
-with open(MODEL_PATH, "rb") as f:
+print()
+print("Loading sign recognition model...")
+
+with open(
+    MODEL_PATH,
+    "rb"
+) as f:
+
     model = pickle.load(f)
+
+
+print(
+    "Model loaded successfully!"
+)
+
+
+# ============================================================
+# CHECK MODEL FEATURE COUNT
+# ============================================================
+
+EXPECTED_FEATURES = model.n_features_in_
+
+print(
+    f"Model expects {EXPECTED_FEATURES} features."
+)
+
+
+if EXPECTED_FEATURES != 126:
+
+    print()
+    print(
+        "WARNING:"
+    )
+
+    print(
+        "This app is designed for a 126-feature "
+        "two-hand model."
+    )
+
+    print(
+        f"Current model expects: "
+        f"{EXPECTED_FEATURES}"
+    )
+
+    print()
 
 
 # ============================================================
@@ -119,83 +336,663 @@ base_options = mp_python.BaseOptions(
     model_asset_path=HAND_MODEL_PATH
 )
 
+
 options = vision.HandLandmarkerOptions(
+
     base_options=base_options,
-    num_hands=1,
+
+    # IMPORTANT
+    # Two hands
+    num_hands=2,
+
     min_hand_detection_confidence=0.4,
+
+    min_hand_presence_confidence=0.4,
+
     min_tracking_confidence=0.4,
+
     running_mode=vision.RunningMode.IMAGE
 )
 
-landmarker = vision.HandLandmarker.create_from_options(options)
+
+landmarker = vision.HandLandmarker.create_from_options(
+    options
+)
 
 
 # ============================================================
-# NORMALIZE LANDMARKS
+# HAND LANDMARK -> 63 FEATURES
 # ============================================================
 
-def normalize_landmarks(landmarks):
+def hand_to_features(hand_landmarks):
 
-    base_x = landmarks[0][0]
-    base_y = landmarks[0][1]
+    """
+    One hand:
 
-    normalized = []
+    21 landmarks
+    x,y,z
 
-    for x, y, z in landmarks:
-        normalized.extend([
-            x - base_x,
-            y - base_y,
-            z
+    = 63 features
+    """
+
+    features = []
+
+    # No hand
+    if hand_landmarks is None:
+
+        return [0.0] * 63
+
+
+    # Wrist is landmark 0
+    base_x = hand_landmarks[0].x
+    base_y = hand_landmarks[0].y
+    base_z = hand_landmarks[0].z
+
+
+    for landmark in hand_landmarks:
+
+        features.extend([
+
+            landmark.x - base_x,
+
+            landmark.y - base_y,
+
+            landmark.z - base_z
+
         ])
 
-    return normalized
+
+    return features
+
+
+# ============================================================
+# GET LEFT + RIGHT HAND
+# ============================================================
+
+def get_left_right_hands(result):
+
+    left_hand = None
+    right_hand = None
+
+
+    if not result.hand_landmarks:
+
+        return left_hand, right_hand
+
+
+    for index, hand_landmarks in enumerate(
+        result.hand_landmarks
+    ):
+
+        if (
+            result.handedness
+            and index < len(result.handedness)
+        ):
+
+            handedness = (
+                result
+                .handedness[index][0]
+                .category_name
+                .lower()
+            )
+
+
+            if handedness == "left":
+
+                left_hand = hand_landmarks
+
+
+            elif handedness == "right":
+
+                right_hand = hand_landmarks
+
+
+    return left_hand, right_hand
+
+
+# ============================================================
+# CREATE TWO-HAND 126 FEATURES
+# ============================================================
+
+def create_two_hand_features(
+    left_hand,
+    right_hand
+):
+
+    """
+    Left hand  = 63
+    Right hand = 63
+
+    Total = 126
+    """
+
+    left_features = hand_to_features(
+        left_hand
+    )
+
+
+    right_features = hand_to_features(
+        right_hand
+    )
+
+
+    features = (
+        left_features
+        + right_features
+    )
+
+
+    if len(features) != 126:
+
+        raise ValueError(
+            f"Expected 126 features, "
+            f"but got {len(features)}"
+        )
+
+
+    return features
 
 
 # ============================================================
 # DRAW HAND LANDMARKS
 # ============================================================
 
-def draw_hand_landmarks(frame, hand_landmarks_list):
+def draw_hand_landmarks(
+    frame,
+    hand_landmarks_list
+):
 
-    h, w, _ = frame.shape
+    height, width, _ = frame.shape
+
 
     connections = [
-        (0, 1), (1, 2), (2, 3), (3, 4),
-        (0, 5), (5, 6), (6, 7), (7, 8),
-        (5, 9), (9, 10), (10, 11), (11, 12),
-        (9, 13), (13, 14), (14, 15), (15, 16),
-        (13, 17), (17, 18), (18, 19), (19, 20),
+
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+
+        (0, 5),
+        (5, 6),
+        (6, 7),
+        (7, 8),
+
+        (5, 9),
+        (9, 10),
+        (10, 11),
+        (11, 12),
+
+        (9, 13),
+        (13, 14),
+        (14, 15),
+        (15, 16),
+
+        (13, 17),
+        (17, 18),
+        (18, 19),
+        (19, 20),
+
         (0, 17)
     ]
 
+
     for hand_landmarks in hand_landmarks_list:
 
-        points = [
-            (int(lm.x * w), int(lm.y * h))
-            for lm in hand_landmarks
-        ]
+        points = []
+
+
+        for landmark in hand_landmarks:
+
+            x = int(
+                landmark.x * width
+            )
+
+            y = int(
+                landmark.y * height
+            )
+
+            points.append(
+                (x, y)
+            )
+
 
         # Draw connections
-        for start_idx, end_idx in connections:
+
+        for start, end in connections:
 
             cv2.line(
+
                 frame,
-                points[start_idx],
-                points[end_idx],
+
+                points[start],
+
+                points[end],
+
                 (0, 255, 0),
+
                 2
             )
 
-        # Draw points
+
+        # Draw landmarks
+
         for point in points:
 
             cv2.circle(
+
                 frame,
+
                 point,
+
                 4,
+
                 (0, 0, 255),
+
                 -1
             )
+
+
+# ============================================================
+# GET TOP PREDICTIONS
+# ============================================================
+
+def get_top_predictions(
+    input_data,
+    top_n=3
+):
+
+    probabilities = (
+        model.predict_proba(
+            input_data
+        )[0]
+    )
+
+
+    classes = model.classes_
+
+
+    top_indices = np.argsort(
+        probabilities
+    )[-top_n:][::-1]
+
+
+    predictions = []
+
+
+    for index in top_indices:
+
+        label = str(
+            classes[index]
+        )
+
+
+        confidence = (
+            float(
+                probabilities[index]
+            )
+            * 100
+        )
+
+
+        predictions.append(
+            (
+                label,
+                confidence
+            )
+        )
+
+
+    return predictions
+
+
+# ============================================================
+# CHECK AMBIGUOUS
+# ============================================================
+
+def is_ambiguous(
+    predictions
+):
+
+    if len(predictions) < 2:
+
+        return False
+
+
+    sign1, confidence1 = (
+        predictions[0]
+    )
+
+    sign2, confidence2 = (
+        predictions[1]
+    )
+
+
+    difference = abs(
+        confidence1 - confidence2
+    )
+
+
+    if difference > AMBIGUITY_THRESHOLD:
+
+        return False
+
+
+    pair = {
+
+        sign1.lower().strip(),
+
+        sign2.lower().strip()
+
+    }
+
+
+    for group in AMBIGUOUS_SIGN_GROUPS:
+
+        if pair.issubset(group):
+
+            return True
+
+
+    return False
+
+
+# ============================================================
+# SMART CONTEXT SENTENCE BUILDER
+# ============================================================
+
+def build_smart_sentence(words):
+
+    """
+    Converts recognized signs
+    into meaningful English sentences.
+    """
+
+    if not words:
+
+        return ""
+
+
+    normalized = [
+
+        str(word)
+        .lower()
+        .strip()
+
+        for word in words
+
+    ]
+
+
+    # --------------------------------------------------------
+    # Remove consecutive duplicates
+    # --------------------------------------------------------
+
+    cleaned = []
+
+
+    for word in normalized:
+
+        if (
+            not cleaned
+            or word != cleaned[-1]
+        ):
+
+            cleaned.append(word)
+
+
+    # --------------------------------------------------------
+    # Exact phrase matching
+    # --------------------------------------------------------
+
+    for phrase, sentence in (
+        CONTEXT_PHRASES.items()
+    ):
+
+        phrase_length = len(
+            phrase
+        )
+
+
+        if len(cleaned) < phrase_length:
+
+            continue
+
+
+        for i in range(
+            len(cleaned) - phrase_length + 1
+        ):
+
+            section = tuple(
+                cleaned[
+                    i:i + phrase_length
+                ]
+            )
+
+
+            if section == phrase:
+
+                return sentence
+
+
+    # --------------------------------------------------------
+    # I NEED
+    # --------------------------------------------------------
+
+    if (
+        len(cleaned) >= 3
+        and cleaned[0] == "i"
+        and cleaned[1] == "need"
+    ):
+
+        return (
+            "I need "
+            + " ".join(
+                cleaned[2:]
+            )
+            + "."
+        )
+
+
+    # --------------------------------------------------------
+    # I WANT
+    # --------------------------------------------------------
+
+    if (
+        len(cleaned) >= 3
+        and cleaned[0] == "i"
+        and cleaned[1] == "want"
+    ):
+
+        return (
+            "I want "
+            + " ".join(
+                cleaned[2:]
+            )
+            + "."
+        )
+
+
+    # --------------------------------------------------------
+    # WHERE
+    # --------------------------------------------------------
+
+    if (
+        len(cleaned) >= 2
+        and cleaned[0] == "where"
+    ):
+
+        return (
+            "Where is "
+            + " ".join(
+                cleaned[1:]
+            )
+            + "?"
+        )
+
+
+    # --------------------------------------------------------
+    # WHAT
+    # --------------------------------------------------------
+
+    if (
+        len(cleaned) >= 2
+        and cleaned[0] == "what"
+    ):
+
+        return (
+            "What is "
+            + " ".join(
+                cleaned[1:]
+            )
+            + "?"
+        )
+
+
+    # --------------------------------------------------------
+    # DEFAULT
+    # --------------------------------------------------------
+
+    sentence = " ".join(
+        cleaned
+    )
+
+
+    if not sentence:
+
+        return ""
+
+
+    return (
+        sentence[0].upper()
+        + sentence[1:]
+        + "."
+    )
+
+
+# ============================================================
+# DISAMBIGUATE SIGN
+# ============================================================
+
+def disambiguate_sign(
+    predictions,
+    sentence_words
+):
+
+    if not predictions:
+
+        return None
+
+
+    best_sign = predictions[0][0]
+
+
+    if len(predictions) < 2:
+
+        return best_sign
+
+
+    sign1, conf1 = (
+        predictions[0]
+    )
+
+    sign2, conf2 = (
+        predictions[1]
+    )
+
+
+    s1 = sign1.lower().strip()
+    s2 = sign2.lower().strip()
+
+
+    context = " ".join(
+        sentence_words
+    ).lower()
+
+
+    # --------------------------------------------------------
+    # CAN / CAN'T
+    # --------------------------------------------------------
+
+    if {s1, s2} == {"can", "can't"}:
+
+        if (
+            "not" in context
+            or "never" in context
+        ):
+
+            if s1 == "can't":
+
+                return sign1
+
+            return sign2
+
+
+    # --------------------------------------------------------
+    # YES / NO
+    # --------------------------------------------------------
+
+    if {s1, s2} == {"yes", "no"}:
+
+        if (
+            "not" in context
+            or "don't" in context
+            or "dont" in context
+        ):
+
+            if s1 == "no":
+
+                return sign1
+
+            return sign2
+
+
+    # --------------------------------------------------------
+    # GOOD / BAD
+    # --------------------------------------------------------
+
+    if {s1, s2} == {"good", "bad"}:
+
+        if (
+            "not" in context
+            or "bad" in context
+        ):
+
+            if s1 == "bad":
+
+                return sign1
+
+            return sign2
+
+
+    # --------------------------------------------------------
+    # COME / GO
+    # --------------------------------------------------------
+
+    if {s1, s2} == {"come", "go"}:
+
+        if "here" in context:
+
+            if s1 == "come":
+
+                return sign1
+
+            return sign2
+
+
+        if "there" in context:
+
+            if s1 == "go":
+
+                return sign1
+
+            return sign2
+
+
+    # --------------------------------------------------------
+    # DEFAULT
+    # --------------------------------------------------------
+
+    return best_sign
 
 
 # ============================================================
@@ -204,388 +1001,197 @@ def draw_hand_landmarks(frame, hand_landmarks_list):
 
 def speak_text(text):
 
-    """
-    Background thread-la audio generate pannum.
-    App freeze aagama irukka thread use pannrom.
-    """
+    if not text:
+
+        return
+
 
     try:
 
-        tts = gTTS(
-            text=text,
-            lang="en"
+        print()
+        print(
+            f"🔊 Speaking: {text}"
         )
 
-        tts.save("temp_speech.mp3")
+
+        tts = gTTS(
+
+            text=text,
+
+            lang="en"
+
+        )
+
+
+        filename = (
+            "temp_speech.mp3"
+        )
+
+
+        tts.save(
+            filename
+        )
+
 
         os.system(
-            "start temp_speech.mp3"
+            f'start "" "{filename}"'
         )
 
-    except Exception as e:
+
+    except Exception as error:
 
         print(
-            f"Speech generation error: {e}"
+            f"TTS Error: {error}"
         )
 
 
 # ============================================================
-# GET TOP PREDICTIONS
-# ============================================================
-
-def get_top_predictions(model, input_data, top_n=3):
-
-    """
-    Model oda top N predictions return pannum.
-
-    Example:
-
-    [
-        ("CAN", 72.5),
-        ("CAN'T", 69.8),
-        ("GO", 20.1)
-    ]
-    """
-
-    probabilities = model.predict_proba(input_data)[0]
-
-    class_names = model.classes_
-
-    top_indices = np.argsort(
-        probabilities
-    )[-top_n:][::-1]
-
-    predictions = []
-
-    for index in top_indices:
-
-        label = str(class_names[index])
-
-        confidence = (
-            float(probabilities[index]) * 100
-        )
-
-        predictions.append(
-            (label, confidence)
-        )
-
-    return predictions
-
-
-# ============================================================
-# CHECK AMBIGUITY
-# ============================================================
-
-def is_ambiguous(predictions):
-
-    """
-    Top 2 predictions confidence close-a irundha
-    ambiguous sign-nu consider pannuvom.
-    """
-
-    if len(predictions) < 2:
-        return False
-
-    sign1, conf1 = predictions[0]
-    sign2, conf2 = predictions[1]
-
-    difference = abs(
-        conf1 - conf2
-    )
-
-    if difference <= AMBIGUITY_THRESHOLD:
-
-        pair = {
-            sign1.lower().strip(),
-            sign2.lower().strip()
-        }
-
-        for group in AMBIGUOUS_SIGN_GROUPS:
-
-            if pair.issubset(group):
-                return True
-
-    return False
-
-
-# ============================================================
-# CONTEXT-BASED DISAMBIGUATION
-# ============================================================
-
-def disambiguate_sign(
-    predictions,
-    sentence_words,
-    facial_marker=None
-):
-
-    """
-    Ambiguous signs-ku context based decision.
-
-    predictions:
-        [("CAN", 72), ("CAN'T", 69)]
-
-    sentence_words:
-        ["I", "go"]
-
-    facial_marker:
-        None
-        "QUESTION"
-        "NEGATIVE"
-        "POSITIVE"
-    """
-
-    if not predictions:
-        return None
-
-    # Highest confidence prediction
-    best_sign = predictions[0][0]
-
-    if len(predictions) < 2:
-        return best_sign
-
-    sign1, conf1 = predictions[0]
-    sign2, conf2 = predictions[1]
-
-    sign1_lower = sign1.lower().strip()
-    sign2_lower = sign2.lower().strip()
-
-    # Confidence difference
-    difference = abs(
-        conf1 - conf2
-    )
-
-    # Not ambiguous
-    if difference > AMBIGUITY_THRESHOLD:
-        return best_sign
-
-    # Previous sentence
-    context = " ".join(
-        str(word) for word in sentence_words
-    ).lower()
-
-    # ========================================================
-    # CAN / CAN'T
-    # ========================================================
-
-    if {
-        sign1_lower,
-        sign2_lower
-    } == {"can", "can't"}:
-
-        if facial_marker == "NEGATIVE":
-            return (
-                sign1
-                if sign1_lower == "can't"
-                else sign2
-            )
-
-        if "not" in context:
-            return (
-                sign1
-                if sign1_lower == "can't"
-                else sign2
-            )
-
-        if "never" in context:
-            return (
-                sign1
-                if sign1_lower == "can't"
-                else sign2
-            )
-
-        return (
-            sign1
-            if sign1_lower == "can"
-            else sign2
-        )
-
-    # ========================================================
-    # YES / NO
-    # ========================================================
-
-    if {
-        sign1_lower,
-        sign2_lower
-    } == {"yes", "no"}:
-
-        if facial_marker == "NEGATIVE":
-
-            return (
-                sign1
-                if sign1_lower == "no"
-                else sign2
-            )
-
-        if facial_marker == "POSITIVE":
-
-            return (
-                sign1
-                if sign1_lower == "yes"
-                else sign2
-            )
-
-    # ========================================================
-    # GOOD / BAD
-    # ========================================================
-
-    if {
-        sign1_lower,
-        sign2_lower
-    } == {"good", "bad"}:
-
-        if facial_marker == "NEGATIVE":
-
-            return (
-                sign1
-                if sign1_lower == "bad"
-                else sign2
-            )
-
-        if facial_marker == "POSITIVE":
-
-            return (
-                sign1
-                if sign1_lower == "good"
-                else sign2
-            )
-
-    # ========================================================
-    # COME / GO
-    # ========================================================
-
-    if {
-        sign1_lower,
-        sign2_lower
-    } == {"come", "go"}:
-
-        if "here" in context:
-
-            return (
-                sign1
-                if sign1_lower == "come"
-                else sign2
-            )
-
-        if "there" in context:
-
-            return (
-                sign1
-                if sign1_lower == "go"
-                else sign2
-            )
-
-    # ========================================================
-    # QUESTION MARKER
-    # ========================================================
-
-    if facial_marker == "QUESTION":
-
-        question_words = {
-            "what",
-            "where",
-            "when",
-            "why",
-            "who",
-            "how"
-        }
-
-        if sign1_lower in question_words:
-            return sign1
-
-        if sign2_lower in question_words:
-            return sign2
-
-    # ========================================================
-    # DEFAULT
-    # ========================================================
-
-    return best_sign
-
-
-# ============================================================
-# MAIN APPLICATION
+# MAIN FUNCTION
 # ============================================================
 
 def main():
 
-    # Camera
+    # ========================================================
+    # CAMERA
+    # ========================================================
+
     cap = cv2.VideoCapture(0)
 
-    # Sentence variables
+
+    if not cap.isOpened():
+
+        print(
+            "ERROR: Camera open panna mudiyala."
+        )
+
+        return
+
+
+    # ========================================================
+    # SENTENCE
+    # ========================================================
+
     sentence = []
 
-    current_word = ""
+
+    current_prediction = None
 
     hold_start_time = None
 
-    last_added_word = ""
+    last_added_prediction = None
+
 
     # ========================================================
-    # EMERGENCY VARIABLES
+    # EMERGENCY
     # ========================================================
 
     emergency_mode = False
 
     emergency_message = ""
 
+
     # ========================================================
-    # AMBIGUOUS SIGN VARIABLES
+    # DISPLAY VARIABLES
     # ========================================================
 
     top_predictions = []
 
     ambiguous_mode = False
 
-    # Facial marker placeholder
-    #
-    # Future MediaPipe FaceLandmarker integration:
-    #
-    # "QUESTION"
-    # "NEGATIVE"
-    # "POSITIVE"
-    #
-    # Ippo None.
-    facial_marker = None
+    prediction = None
+
+    confidence = 0.0
+
 
     # ========================================================
     # START MESSAGE
     # ========================================================
 
-    print("=" * 60)
-    print("       SIGN LANGUAGE RECOGNITION APP")
-    print("=" * 60)
-
     print()
-    print("App ready!")
     print(
-        "Sign pannunga, 1.5 sec hold pannina "
-        "sentence la add aagum."
+        "=" * 60
     )
-    print()
 
-    print("CONTROLS:")
-    print("c = Clear sentence")
-    print("v = Voice")
-    print("b = Backspace")
-    print("e = Reset Emergency Mode")
-    print("q = Quit")
-
-    print()
-
-    print("NEW FEATURE:")
     print(
-        "Ambiguous Sign Disambiguation enabled."
+        "          SIGN LANGUAGE RECOGNITION APP"
+    )
+
+    print(
+        "=" * 60
     )
 
     print()
 
-    print("Emergency Signs:")
-    print("help      -> I need help")
-    print("doctor    -> I need a doctor")
-    print("emergency -> Emergency")
-    print("family    -> Please call my family")
-    print("ambulance -> Please call an ambulance")
+    print(
+        "App ready!"
+    )
+
+    print(
+        "Sign ah 1.5 seconds hold pannunga."
+    )
+
+    print(
+        "Recognized sign sentence la add aagum."
+    )
+
     print()
+
+    print(
+        "FEATURES:"
+    )
+
+    print(
+        "✓ Two-Hand Recognition"
+    )
+
+    print(
+        "✓ 126 Feature Model"
+    )
+
+    print(
+        "✓ Smart Context"
+    )
+
+    print(
+        "✓ Ambiguous Sign Disambiguation"
+    )
+
+    print(
+        "✓ Emergency Communication"
+    )
+
+    print(
+        "✓ Text-to-Speech"
+    )
+
+    print()
+
+    print(
+        "CONTROLS:"
+    )
+
+    print(
+        "c = Clear sentence"
+    )
+
+    print(
+        "v = Voice"
+    )
+
+    print(
+        "b = Backspace"
+    )
+
+    print(
+        "e = Reset Emergency"
+    )
+
+    print(
+        "q = Quit"
+    )
+
+    print()
+
 
     # ========================================================
     # CAMERA LOOP
@@ -593,43 +1199,62 @@ def main():
 
     while cap.isOpened():
 
-        success, frame = cap.read()
+        success, frame = (
+            cap.read()
+        )
+
 
         if not success:
 
             print(
-                "Camera access panna mudiyala."
+                "Camera frame read failed."
             )
 
             break
 
-        # Mirror camera
+
+        # ====================================================
+        # MIRROR
+        # ====================================================
+
         frame = cv2.flip(
             frame,
             1
         )
 
+
         # ====================================================
-        # CONVERT FRAME FOR MEDIAPIPE
+        # RGB
         # ====================================================
 
         rgb_frame = cv2.cvtColor(
+
             frame,
+
             cv2.COLOR_BGR2RGB
+
         )
+
 
         mp_image = mp.Image(
-            image_format=mp.ImageFormat.SRGB,
+
+            image_format=(
+                mp.ImageFormat.SRGB
+            ),
+
             data=rgb_frame
+
         )
 
+
         # ====================================================
-        # HAND DETECTION
+        # MEDIAPIPE
         # ====================================================
 
         result = landmarker.detect(
             mp_image
         )
+
 
         prediction = None
 
@@ -639,468 +1264,746 @@ def main():
 
         ambiguous_mode = False
 
+
         # ====================================================
-        # SIGN PREDICTION
+        # HANDS DETECTED
         # ====================================================
 
         if result.hand_landmarks:
 
-            # Draw landmarks
+            # Draw hands
+
             draw_hand_landmarks(
+
                 frame,
+
                 result.hand_landmarks
+
             )
 
-            landmark_list = [
-                (lm.x, lm.y, lm.z)
-                for lm in result.hand_landmarks[0]
-            ]
 
-            # Normalize
-            normalized = normalize_landmarks(
-                landmark_list
+            # Get left/right
+
+            left_hand, right_hand = (
+                get_left_right_hands(
+                    result
+                )
             )
 
-            # Convert to numpy
+
+            # =================================================
+            # CREATE 126 FEATURES
+            # =================================================
+
+            features = (
+                create_two_hand_features(
+
+                    left_hand,
+
+                    right_hand
+
+                )
+            )
+
+
+            # =================================================
+            # MODEL INPUT
+            # =================================================
+
             input_data = np.array(
-                normalized
+                features,
+                dtype=np.float32
             ).reshape(
                 1,
                 -1
             )
 
+
+            # Safety
+
+            if input_data.shape[1] != (
+                EXPECTED_FEATURES
+            ):
+
+                print(
+                    "Feature mismatch!"
+                )
+
+                print(
+                    f"Created: "
+                    f"{input_data.shape[1]}"
+                )
+
+                print(
+                    f"Expected: "
+                    f"{EXPECTED_FEATURES}"
+                )
+
+                continue
+
+
             # =================================================
             # TOP PREDICTIONS
             # =================================================
 
-            top_predictions = get_top_predictions(
-                model,
-                input_data,
-                top_n=3
+            top_predictions = (
+                get_top_predictions(
+                    input_data,
+                    top_n=3
+                )
             )
 
-            # Highest confidence
-            pred = top_predictions[0][0]
 
-            conf = top_predictions[0][1]
+            if top_predictions:
 
-            # =================================================
-            # AMBIGUITY CHECK
-            # =================================================
+                best_sign = (
+                    top_predictions[0][0]
+                )
 
-            ambiguous_mode = is_ambiguous(
-                top_predictions
-            )
+                best_confidence = (
+                    top_predictions[0][1]
+                )
 
-            # =================================================
-            # CONFIDENCE CHECK
-            # =================================================
 
-            if conf >= CONFIDENCE_THRESHOLD:
+                if (
+                    best_confidence
+                    >= CONFIDENCE_THRESHOLD
+                ):
 
-                # If ambiguous:
-                # context + facial marker use pannum
-                if ambiguous_mode:
-
-                    prediction = disambiguate_sign(
-                        top_predictions,
-                        sentence,
-                        facial_marker
+                    prediction = (
+                        best_sign
                     )
 
-                    # Highest selected confidence
-                    selected_conf = conf
+                    confidence = (
+                        best_confidence
+                    )
 
-                    for sign, sign_conf in top_predictions:
 
-                        if sign == prediction:
-                            selected_conf = sign_conf
-                            break
+                    # =========================================
+                    # AMBIGUOUS
+                    # =========================================
 
-                    confidence = selected_conf
+                    ambiguous_mode = (
+                        is_ambiguous(
+                            top_predictions
+                        )
+                    )
 
-                else:
 
-                    prediction = pred
+                    if ambiguous_mode:
 
-                    confidence = conf
+                        prediction = (
+                            disambiguate_sign(
+
+                                top_predictions,
+
+                                sentence
+
+                            )
+                        )
+
+
+                        # Get confidence
+                        for sign, conf in (
+                            top_predictions
+                        ):
+
+                            if sign == prediction:
+
+                                confidence = conf
+
+                                break
+
 
         # ====================================================
-        # HOLD-TO-CONFIRM LOGIC
+        # HOLD LOGIC
         # ====================================================
 
         if prediction:
 
-            # Same sign continues
-            if prediction == current_word:
+            # Same sign
 
-                if hold_start_time is not None:
+            if (
+                prediction
+                == current_prediction
+            ):
 
-                    elapsed = (
+                if hold_start_time is None:
+
+                    hold_start_time = (
                         time.time()
-                        - hold_start_time
                     )
 
-                else:
 
-                    elapsed = 0
+                elapsed = (
+                    time.time()
+                    - hold_start_time
+                )
 
-                # Sign held for 1.5 seconds
+
+                # =============================================
+                # ADD SIGN
+                # =============================================
+
                 if (
-                    elapsed >= HOLD_DURATION
-                    and prediction != last_added_word
+                    elapsed
+                    >= HOLD_DURATION
                 ):
 
-                    # ========================================
-                    # ADD SIGN TO SENTENCE
-                    # ========================================
-
-                    sentence.append(
+                    if (
                         prediction
-                    )
+                        != last_added_prediction
+                    ):
 
-                    last_added_word = prediction
-
-                    hold_start_time = time.time()
-
-                    # ========================================
-                    # EMERGENCY MODE CHECK
-                    # ========================================
-
-                    prediction_key = str(
-                        prediction
-                    ).lower().strip()
-
-                    if prediction_key in EMERGENCY_SIGNS:
-
-                        # Activate Emergency Mode
-                        emergency_mode = True
-
-                        # Get emergency message
-                        emergency_message = (
-                            EMERGENCY_SIGNS[
-                                prediction_key
-                            ]
+                        sentence.append(
+                            prediction
                         )
 
-                        print()
-                        print("=" * 60)
-                        print(
-                            "🚨 EMERGENCY MODE ACTIVATED!"
-                        )
-                        print("=" * 60)
 
-                        print(
-                            f"Emergency Message: "
-                            f"{emergency_message}"
+                        last_added_prediction = (
+                            prediction
                         )
 
-                        print("=" * 60)
 
-                        # Speak emergency message
-                        threading.Thread(
-                            target=speak_text,
-                            args=(emergency_message,)
-                        ).start()
+                        # =====================================
+                        # SMART SENTENCE
+                        # =====================================
 
-                    # ========================================
-                    # AMBIGUOUS SIGN INFORMATION
-                    # ========================================
-
-                    if ambiguous_mode:
-
-                        print()
-                        print(
-                            "Ambiguous Sign Detected"
-                        )
-
-                        print(
-                            "Top Predictions:"
-                        )
-
-                        for sign, conf in top_predictions:
-
-                            print(
-                                f"  {sign}: "
-                                f"{conf:.1f}%"
+                        smart_sentence = (
+                            build_smart_sentence(
+                                sentence
                             )
+                        )
+
+
+                        print()
 
                         print(
-                            f"Context Decision: "
+                            "-" * 60
+                        )
+
+                        print(
+                            f"Recognized Sign: "
                             f"{prediction}"
                         )
 
-                        print()
+                        print(
+                            f"Sentence: "
+                            f"{smart_sentence}"
+                        )
 
-            # New sign
+                        print(
+                            "-" * 60
+                        )
+
+
+                        # =====================================
+                        # EMERGENCY
+                        # =====================================
+
+                        prediction_key = (
+                            str(
+                                prediction
+                            )
+                            .lower()
+                            .strip()
+                        )
+
+
+                        if (
+                            prediction_key
+                            in EMERGENCY_SIGNS
+                        ):
+
+                            emergency_mode = True
+
+
+                            emergency_message = (
+                                EMERGENCY_SIGNS[
+                                    prediction_key
+                                ]
+                            )
+
+
+                            print()
+
+                            print(
+                                "🚨 "
+                                "EMERGENCY MODE ACTIVATED!"
+                            )
+
+                            print(
+                                emergency_message
+                            )
+
+
+                            threading.Thread(
+
+                                target=speak_text,
+
+                                args=(
+                                    emergency_message,
+                                )
+
+                            ).start()
+
+
+                        # =====================================
+                        # AMBIGUOUS LOG
+                        # =====================================
+
+                        if ambiguous_mode:
+
+                            print()
+
+                            print(
+                                "⚠ AMBIGUOUS SIGN"
+                            )
+
+                            for sign, conf in (
+                                top_predictions
+                            ):
+
+                                print(
+                                    f"{sign}: "
+                                    f"{conf:.1f}%"
+                                )
+
+                            print(
+                                f"Selected: "
+                                f"{prediction}"
+                            )
+
+
+            # =================================================
+            # NEW SIGN
+            # =================================================
+
             else:
 
-                current_word = prediction
+                current_prediction = (
+                    prediction
+                )
 
-                hold_start_time = time.time()
+                hold_start_time = (
+                    time.time()
+                )
 
-                last_added_word = ""
+                last_added_prediction = None
+
 
         # ====================================================
-        # NO SIGN DETECTED
+        # NO SIGN
         # ====================================================
 
         else:
 
-            current_word = ""
+            current_prediction = None
 
             hold_start_time = None
 
-            last_added_word = ""
+            last_added_prediction = None
+
 
         # ====================================================
-        # UI DRAWING
+        # UI SIZE
         # ====================================================
 
-        h, w, _ = frame.shape
+        height, width, _ = (
+            frame.shape
+        )
+
 
         # ====================================================
         # TOP BAR
         # ====================================================
 
         cv2.rectangle(
+
             frame,
+
             (0, 0),
-            (w, 100),
+
+            (width, 115),
+
             (0, 0, 0),
+
             -1
+
         )
 
+
         # ====================================================
-        # PREDICTION DISPLAY
+        # PREDICTION TEXT
         # ====================================================
 
         if prediction:
 
-            # Hold progress
-            if hold_start_time:
-
-                hold_progress = min(
-                    (
-                        time.time()
-                        - hold_start_time
-                    )
-                    / HOLD_DURATION,
-                    1.0
-                )
-
-            else:
-
-                hold_progress = 0
-
-            # Prediction text
             cv2.putText(
+
                 frame,
-                f"Detecting: {prediction} "
-                f"({confidence:.0f}%)",
+
+                f"Sign: {prediction}",
+
                 (10, 30),
+
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
+
+                0.75,
+
                 (0, 255, 0),
+
                 2
+
             )
 
+
+            cv2.putText(
+
+                frame,
+
+                f"Confidence: "
+                f"{confidence:.1f}%",
+
+                (10, 58),
+
+                cv2.FONT_HERSHEY_SIMPLEX,
+
+                0.6,
+
+                (255, 255, 255),
+
+                2
+
+            )
+
+
             # =================================================
-            # AMBIGUOUS DISPLAY
+            # AMBIGUOUS UI
             # =================================================
 
             if ambiguous_mode:
 
                 cv2.putText(
+
                     frame,
-                    "AMBIGUOUS SIGN - CONTEXT CHECK",
-                    (10, 55),
+
+                    "AMBIGUOUS - "
+                    "CONTEXT CHECK",
+
+                    (10, 84),
+
                     cv2.FONT_HERSHEY_SIMPLEX,
+
                     0.55,
+
                     (0, 255, 255),
+
                     2
+
                 )
 
-                # Show top 2 predictions
-                if len(top_predictions) >= 2:
 
-                    p1, c1 = top_predictions[0]
-                    p2, c2 = top_predictions[1]
+            # =================================================
+            # HOLD PROGRESS
+            # =================================================
 
-                    cv2.putText(
-                        frame,
-                        f"{p1}: {c1:.0f}% | "
-                        f"{p2}: {c2:.0f}%",
-                        (10, 78),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),
-                        1
-                    )
+            if hold_start_time:
 
-            # Progress bar background
-            cv2.rectangle(
-                frame,
-                (10, 85),
-                (310, 98),
-                (100, 100, 100),
-                1
-            )
+                elapsed = (
+                    time.time()
+                    - hold_start_time
+                )
 
-            # Progress
+                progress = min(
+
+                    elapsed
+                    / HOLD_DURATION,
+
+                    1.0
+
+                )
+
+            else:
+
+                progress = 0.0
+
+
             bar_width = int(
-                300 * hold_progress
+                300 * progress
             )
 
+
             cv2.rectangle(
+
                 frame,
-                (10, 85),
-                (
-                    10 + bar_width,
-                    98
-                ),
-                (0, 255, 255),
-                -1
+
+                (width - 320, 15),
+
+                (width - 20, 32),
+
+                (100, 100, 100),
+
+                2
+
             )
+
+
+            cv2.rectangle(
+
+                frame,
+
+                (width - 320, 15),
+
+                (
+                    width - 320 + bar_width,
+                    32
+                ),
+
+                (0, 255, 255),
+
+                -1
+
+            )
+
 
         else:
 
             cv2.putText(
+
                 frame,
+
                 "Show a sign...",
-                (10, 30),
+
+                (10, 35),
+
                 cv2.FONT_HERSHEY_SIMPLEX,
+
                 0.8,
-                (150, 150, 150),
+
+                (180, 180, 180),
+
                 2
+
             )
 
-        # ====================================================
-        # FACIAL MARKER DISPLAY
-        # ====================================================
-
-        if facial_marker:
-
-            cv2.putText(
-                frame,
-                f"Face Marker: {facial_marker}",
-                (w - 300, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 0),
-                2
-            )
 
         # ====================================================
-        # EMERGENCY ALERT UI
+        # EMERGENCY DISPLAY
         # ====================================================
 
         if emergency_mode:
 
-            # Red alert box
             cv2.rectangle(
+
                 frame,
-                (0, 105),
-                (w, 190),
-                (0, 0, 255),
+
+                (0, 120),
+
+                (width, 205),
+
+                (0, 0, 180),
+
                 -1
+
             )
 
-            # Emergency title
+
             cv2.putText(
+
                 frame,
+
                 "!!! EMERGENCY MODE !!!",
-                (20, 140),
+
+                (20, 155),
+
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
+
+                0.85,
+
                 (255, 255, 255),
+
                 3
+
             )
 
-            # Emergency message
+
             cv2.putText(
+
                 frame,
+
                 emergency_message,
-                (20, 175),
+
+                (20, 190),
+
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
+
+                0.62,
+
                 (255, 255, 255),
+
                 2
+
             )
 
+
         # ====================================================
-        # BOTTOM SENTENCE BAR
+        # SENTENCE
         # ====================================================
+
+        smart_sentence = (
+            build_smart_sentence(
+                sentence
+            )
+        )
+
+
+        # Bottom area
 
         cv2.rectangle(
+
             frame,
-            (0, h - 70),
-            (w, h),
+
+            (0, height - 100),
+
+            (width, height),
+
             (30, 30, 30),
+
             -1
+
         )
 
-        sentence_text = (
-            " ".join(sentence)
-            if sentence
-            else "(sentence empty)"
-        )
 
         cv2.putText(
+
             frame,
-            sentence_text,
-            (10, h - 25),
+
+            "Sentence:",
+
+            (10, height - 70),
+
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
+
+            0.55,
+
+            (0, 255, 255),
+
             2
+
         )
 
+
+        # Avoid too long text
+
+        display_sentence = (
+            smart_sentence
+        )
+
+
+        if len(display_sentence) > 70:
+
+            display_sentence = (
+                display_sentence[-70:]
+            )
+
+
+        cv2.putText(
+
+            frame,
+
+            display_sentence,
+
+            (10, height - 35),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.65,
+
+            (255, 255, 255),
+
+            2
+
+        )
+
+
         # ====================================================
-        # SHOW CAMERA WINDOW
+        # CONTROL INFO
+        # ====================================================
+
+        cv2.putText(
+
+            frame,
+
+            "C:Clear  V:Voice  "
+            "B:Backspace  E:Emergency  Q:Quit",
+
+            (10, height - 8),
+
+            cv2.FONT_HERSHEY_SIMPLEX,
+
+            0.4,
+
+            (180, 180, 180),
+
+            1
+
+        )
+
+
+        # ====================================================
+        # SHOW
         # ====================================================
 
         cv2.imshow(
-            "Sign Language Recognition App",
+
+            "ISL Sign Language Translator",
+
             frame
+
         )
 
+
         # ====================================================
-        # KEYBOARD CONTROLS
+        # KEYBOARD
         # ====================================================
 
-        key = cv2.waitKey(1) & 0xFF
+        key = (
+            cv2.waitKey(1)
+            & 0xFF
+        )
 
-        # Quit
+
+        # ====================================================
+        # QUIT
+        # ====================================================
+
         if key == ord("q"):
 
             break
 
+
         # ====================================================
-        # CLEAR SENTENCE
+        # CLEAR
         # ====================================================
 
         elif key == ord("c"):
 
             sentence = []
 
+            current_prediction = None
+
+            hold_start_time = None
+
+            last_added_prediction = None
+
+
+            print()
+
             print(
-                "Sentence cleared."
+                "✓ Sentence cleared."
             )
 
-        # ====================================================
-        # BACKSPACE
-        # ====================================================
-
-        elif key == ord("b"):
-
-            if sentence:
-
-                removed = sentence.pop()
-
-                print(
-                    f"Removed: {removed}"
-                )
 
         # ====================================================
         # VOICE
@@ -1110,21 +2013,67 @@ def main():
 
             if sentence:
 
-                full_text = " ".join(
-                    sentence
+                smart_sentence = (
+                    build_smart_sentence(
+                        sentence
+                    )
                 )
 
-                print(
-                    f"Speaking: {full_text}"
-                )
 
                 threading.Thread(
+
                     target=speak_text,
-                    args=(full_text,)
+
+                    args=(
+                        smart_sentence,
+                    )
+
                 ).start()
 
+
+            else:
+
+                print(
+                    "Sentence empty."
+                )
+
+
         # ====================================================
-        # RESET EMERGENCY MODE
+        # BACKSPACE
+        # ====================================================
+
+        elif key == ord("b"):
+
+            if sentence:
+
+                removed = (
+                    sentence.pop()
+                )
+
+
+                print(
+                    f"Removed: {removed}"
+                )
+
+
+                if sentence:
+
+                    print(
+                        "Sentence: "
+                        + build_smart_sentence(
+                            sentence
+                        )
+                    )
+
+                else:
+
+                    print(
+                        "Sentence empty."
+                    )
+
+
+        # ====================================================
+        # RESET EMERGENCY
         # ====================================================
 
         elif key == ord("e"):
@@ -1133,9 +2082,13 @@ def main():
 
             emergency_message = ""
 
+
+            print()
+
             print(
-                "Emergency Mode reset."
+                "✓ Emergency Mode reset."
             )
+
 
     # ========================================================
     # RELEASE CAMERA
@@ -1147,7 +2100,7 @@ def main():
 
 
 # ============================================================
-# START APP
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
